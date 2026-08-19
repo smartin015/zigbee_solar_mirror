@@ -9,6 +9,7 @@
  *   incoming    EP10-12: unit vector from the mirror toward the sun
  *   reflect     EP13-15: unit vector from the mirror toward the target
  *   calibration EP16-18: mirror normal when both servos are at 2048
+ *   target_mode EP19   : 0=half_angle, 1=incoming, 2=reflect, 3=calibration
  *
  * Servo roles:
  *   servo ID 1 -> vertical tilt
@@ -46,6 +47,7 @@
 #define EP_CAL_X         16
 #define EP_CAL_Y         17
 #define EP_CAL_Z         18
+#define EP_TARGET_MODE   19
 
 // === Global objects ===
 MirrorController mirror;
@@ -59,6 +61,7 @@ ZigbeeAnalog zbReflectZ(EP_REFLECT_Z);
 ZigbeeAnalog zbCalX(EP_CAL_X);
 ZigbeeAnalog zbCalY(EP_CAL_Y);
 ZigbeeAnalog zbCalZ(EP_CAL_Z);
+ZigbeeAnalog zbTargetMode(EP_TARGET_MODE);
 
 // === Factory-reset button state ===
 static uint32_t btnPressStartMs = 0;
@@ -81,15 +84,23 @@ static void onCalX(float v) { mirror.setComponent(VECTOR_CALIBRATION, AXIS_X, v)
 static void onCalY(float v) { mirror.setComponent(VECTOR_CALIBRATION, AXIS_Y, v); }
 static void onCalZ(float v) { mirror.setComponent(VECTOR_CALIBRATION, AXIS_Z, v); }
 
+static void onTargetMode(float v) {
+  long mode = lroundf(v);
+  if (mode < 0) mode = 0;
+  if (mode > 3) mode = 3;
+  mirror.setTargetMode((uint8_t)mode);
+}
+
 // -------------------------------------------------------------------------
 // Endpoint helpers
 // -------------------------------------------------------------------------
 
-static void configureVectorEndpoint(
-  ZigbeeAnalog &ep, const char *model, const char *description, void (*onChange)(float)
-) {
+static void configureVectorEndpoint(ZigbeeAnalog &ep, const char *description, void (*onChange)(float)) {
   ep.addAnalogOutput();
-  ep.setManufacturerAndModel("Seeed Studio", model);
+  // One physical device, one model ID. Z2M matches on this value; keep it
+  // identical on every endpoint so a single external converter definition
+  // can map all nine endpoints.
+  ep.setManufacturerAndModel("Seeed Studio", "XIAO-SolarMirror");
   ep.setAnalogOutputDescription(description);
   ep.setAnalogOutputMinMax(-1.0f, 1.0f);
   ep.setAnalogOutputResolution(0.0001f);
@@ -124,17 +135,27 @@ void setup() {
   mirror.begin(SERVO_PIN);
 
   // --- Configure the three Zigbee vectors (9 scalar analog endpoints) ---
-  configureVectorEndpoint(zbIncomingX, "XIAO-SolarMirror-InX", "Incoming vector X (mirror->sun, unitless)", onIncomingX);
-  configureVectorEndpoint(zbIncomingY, "XIAO-SolarMirror-InY", "Incoming vector Y (mirror->sun, unitless)", onIncomingY);
-  configureVectorEndpoint(zbIncomingZ, "XIAO-SolarMirror-InZ", "Incoming vector Z (mirror->sun, unitless)", onIncomingZ);
+  configureVectorEndpoint(zbIncomingX, "Incoming vector X (mirror->sun, unitless)", onIncomingX);
+  configureVectorEndpoint(zbIncomingY, "Incoming vector Y (mirror->sun, unitless)", onIncomingY);
+  configureVectorEndpoint(zbIncomingZ, "Incoming vector Z (mirror->sun, unitless)", onIncomingZ);
 
-  configureVectorEndpoint(zbReflectX, "XIAO-SolarMirror-RefX", "Reflect vector X (mirror->target, unitless)", onReflectX);
-  configureVectorEndpoint(zbReflectY, "XIAO-SolarMirror-RefY", "Reflect vector Y (mirror->target, unitless)", onReflectY);
-  configureVectorEndpoint(zbReflectZ, "XIAO-SolarMirror-RefZ", "Reflect vector Z (mirror->target, unitless)", onReflectZ);
+  configureVectorEndpoint(zbReflectX, "Reflect vector X (mirror->target, unitless)", onReflectX);
+  configureVectorEndpoint(zbReflectY, "Reflect vector Y (mirror->target, unitless)", onReflectY);
+  configureVectorEndpoint(zbReflectZ, "Reflect vector Z (mirror->target, unitless)", onReflectZ);
 
-  configureVectorEndpoint(zbCalX, "XIAO-SolarMirror-CalX", "Calibration normal X at pan=tilt=2048", onCalX);
-  configureVectorEndpoint(zbCalY, "XIAO-SolarMirror-CalY", "Calibration normal Y at pan=tilt=2048", onCalY);
-  configureVectorEndpoint(zbCalZ, "XIAO-SolarMirror-CalZ", "Calibration normal Z at pan=tilt=2048", onCalZ);
+  configureVectorEndpoint(zbCalX, "Calibration normal X at pan=tilt=2048", onCalX);
+  configureVectorEndpoint(zbCalY, "Calibration normal Y at pan=tilt=2048", onCalY);
+  configureVectorEndpoint(zbCalZ, "Calibration normal Z at pan=tilt=2048", onCalZ);
+
+  // EP19: target mode (0=half_angle, 1=incoming, 2=reflect, 3=calibration).
+  zbTargetMode.addAnalogOutput();
+  zbTargetMode.setManufacturerAndModel("Seeed Studio", "XIAO-SolarMirror");
+  zbTargetMode.setAnalogOutputDescription("Servo target mode: 0=half_angle, 1=incoming, 2=reflect, 3=calibration");
+  zbTargetMode.setAnalogOutputMinMax(0.0f, 3.0f);
+  zbTargetMode.setAnalogOutputResolution(1.0f);
+  zbTargetMode.setAnalogOutputApplication(ESP_ZB_ZCL_AO_SET_APP_TYPE_WITH_ID(ESP_ZB_ZCL_AO_APP_TYPE_COUNT_UNITLESS, 0));
+  zbTargetMode.onAnalogOutputChange(onTargetMode);
+  Zigbee.addEndpoint(&zbTargetMode);
 
   // --- Start Zigbee ---
   Serial.print(F("[ZIGBEE] Starting as "));
@@ -169,6 +190,7 @@ void setup() {
   zbCalX.setAnalogOutput(cal.x);
   zbCalY.setAnalogOutput(cal.y);
   zbCalZ.setAnalogOutput(cal.z);
+  zbTargetMode.setAnalogOutput((float)mirror.targetMode());
 }
 
 // -------------------------------------------------------------------------

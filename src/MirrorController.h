@@ -23,6 +23,14 @@ enum Axis {
   AXIS_Z = 2,
 };
 
+// How the incoming/reflect vectors are interpreted when moving the mirror.
+enum TargetMode {
+  MODE_HALF_ANGLE = 0,  // mirror normal = normalize(incoming + reflect)
+  MODE_INCOMING = 1,    // mirror normal = normalize(incoming)
+  MODE_REFLECT = 2,     // mirror normal = normalize(reflect)
+  MODE_CALIBRATION = 3, // move to the calibration pose (pan=tilt=2048)
+};
+
 //
 // MirrorController owns the two ST3215 servos and translates the three
 // Zigbee vectors into servo positions.
@@ -54,6 +62,10 @@ public:
 
   // Called by the Zigbee callbacks whenever a vector component is written.
   void setComponent(VectorKind kind, Axis axis, float value);
+
+  // Select how incoming/reflect are interpreted (TargetMode values above).
+  void setTargetMode(uint8_t mode);
+  uint8_t targetMode() const { return _targetMode; }
 
   // Call from loop(). Recomputes and commands the servos after a short
   // debounce so a burst of X/Y/Z writes coalesces into one movement.
@@ -90,6 +102,9 @@ private:
   bool _incomingDirty;
   bool _reflectDirty;
   bool _calibrationDirty;
+  bool _targetModeDirty;
+
+  uint8_t _targetMode;
 
   bool _servosOk;
   int16_t _pan;

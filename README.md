@@ -33,7 +33,8 @@ Servo IDs must be unique:
 ## Zigbee interface
 
 One endpoint per vector component. All are **writable and readable** analog
-outputs (`-1.0 .. 1.0`, resolution 0.0001, unitless).
+outputs. Vector components are `-1.0 .. 1.0` (resolution 0.0001, unitless);
+`target_mode` is `0 .. 3` (resolution 1).
 
 | Endpoint | Field |
 |----------|-------|
@@ -46,6 +47,7 @@ outputs (`-1.0 .. 1.0`, resolution 0.0001, unitless).
 | EP16 | calibration vector X |
 | EP17 | calibration vector Y |
 | EP18 | calibration vector Z |
+| EP19 | target mode |
 
 ### Vector conventions
 
@@ -90,13 +92,68 @@ Until calibration is written, the firmware uses a default of `(1, 0, 0)`
 
 ## Operation
 
-Write the three components of `incoming` (EP10-12) and the three components of
-`reflect` (EP13-15). The firmware waits ~80 ms after the last component write
-(so X/Y/Z bursts coalesce), then commands both servos in a single ST3215
-sync-write frame.
+The mirror can be commanded to move to any of the three vectors, or to the
+half-angle between the sun and target vectors. The `target_mode` endpoint
+(EP19) selects the interpretation:
 
-If either vector is zero, or the two vectors are exactly opposite, the firmware
-keeps the previous servo positions and logs a message.
+| `target_mode` | Mirror normal target |
+|---------------|----------------------|
+| `0` (`half_angle`) | `normalize(incoming + reflect)` — reflection mode (default) |
+| `1` (`incoming`)   | `normalize(incoming)` — point the mirror at the sun vector |
+| `2` (`reflect`)    | `normalize(reflect)` — point the mirror at the target vector |
+| `3` (`calibration`) | move both servos to the calibration pose (`pan=tilt=2048`) |
+
+Write the required vector components first, then write the mode (or change
+the mode while the vectors are already set). The firmware waits ~80 ms after
+the last write so X/Y/Z bursts coalesce, then commands both servos in a single
+ST3215 sync-write frame.
+
+In `half_angle` mode, if either vector is zero or the two vectors are exactly
+opposite, the firmware keeps the previous servo positions and logs a message.
+
+## Zigbee2MQTT
+
+An external converter is provided in `zigbee2mqtt/solar-mirror.mjs`.
+Copy it to Zigbee2MQTT's `external_converters/` directory (and enable
+`external_js` / `enable_external_js` as required by your Zigbee2MQTT
+version).
+
+The converter matches the firmware's Basic-cluster model ID
+`XIAO-SolarMirror` and maps the ten analog-output endpoints to these
+MQTT properties:
+
+| MQTT property | Endpoint |
+|---------------|----------|
+| `incoming_x`, `incoming_y`, `incoming_z` | EP10-12 |
+| `reflect_x`, `reflect_y`, `reflect_z` | EP13-15 |
+| `calibration_x`, `calibration_y`, `calibration_z` | EP16-18 |
+| `target_mode` | EP19 |
+
+Vector components are read/write (`access.ALL`) floats in `[-1, 1]`;
+`target_mode` is exposed as the enum `half_angle`, `incoming`, `reflect`,
+or `calibration`.
+
+Example MQTT commands:
+
+```text
+# Reflection mode: mirror normal = half-angle between sun and target
+zigbee2mqtt/SOLAR_MIRROR/set/incoming_x 0.0
+zigbee2mqtt/SOLAR_MIRROR/set/incoming_y 0.0
+zigbee2mqtt/SOLAR_MIRROR/set/incoming_z 1.0
+zigbee2mqtt/SOLAR_MIRROR/set/reflect_x  1.0
+zigbee2mqtt/SOLAR_MIRROR/set/reflect_y  0.0
+zigbee2mqtt/SOLAR_MIRROR/set/reflect_z  0.0
+zigbee2mqtt/SOLAR_MIRROR/set/target_mode half_angle
+
+# Point the mirror directly at the incoming (sun) vector
+zigbee2mqtt/SOLAR_MIRROR/set/target_mode incoming
+
+# Point the mirror directly at the reflect (target) vector
+zigbee2mqtt/SOLAR_MIRROR/set/target_mode reflect
+
+# Home both servos to the calibration pose (pan=tilt=2048)
+zigbee2mqtt/SOLAR_MIRROR/set/target_mode calibration
+```
 
 ## Build and flash
 

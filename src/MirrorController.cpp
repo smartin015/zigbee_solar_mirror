@@ -36,6 +36,8 @@ MirrorController::MirrorController()
     _incomingDirty(false),
     _reflectDirty(false),
     _calibrationDirty(false),
+    _targetModeDirty(false),
+    _targetMode(MODE_HALF_ANGLE),
     _servosOk(false),
     _pan(SERVO_MID),
     _tilt(SERVO_MID),
@@ -149,6 +151,22 @@ void MirrorController::setComponent(VectorKind kind, Axis axis, float value) {
   markDirty();
 }
 
+void MirrorController::setTargetMode(uint8_t mode) {
+  if (mode > MODE_CALIBRATION) {
+    mode = MODE_CALIBRATION;
+  }
+  if (mode == _targetMode) {
+    return;
+  }
+
+  _targetMode = mode;
+  _targetModeDirty = true;
+  markDirty();
+
+  const char *names[] = {"half_angle", "incoming", "reflect", "calibration"};
+  Serial.printf("[MIRROR] Target mode set to %u (%s)\n", _targetMode, names[_targetMode]);
+}
+
 void MirrorController::update() {
   if (!_dirty) {
     return;
@@ -182,28 +200,56 @@ void MirrorController::update() {
 
   bool incomingChanged = _incomingDirty;
   bool reflectChanged = _reflectDirty;
+  bool modeChanged = _targetModeDirty;
   _incomingDirty = false;
   _reflectDirty = false;
+  _targetModeDirty = false;
 
-  if (!incomingChanged && !reflectChanged && !calibrationChanged) {
+  if (!incomingChanged && !reflectChanged && !calibrationChanged && !modeChanged) {
+    return;
+  }
+
+  // Mode 3 explicitly homes the mirror to the calibration pose.
+  if (_targetMode == MODE_CALIBRATION) {
+    Serial.printf(
+      "[MIRROR] Moving to calibration vector (%.3f,%.3f,%.3f) -> pan=%d tilt=%d\n",
+      _calibration.x, _calibration.y, _calibration.z, SERVO_MID, SERVO_MID
+    );
+    moveServos(SERVO_MID, SERVO_MID);
     return;
   }
 
   Vec3 incomingN = normalizedOrZero(_incoming);
   Vec3 reflectN = normalizedOrZero(_reflect);
 
-  if (vectorNorm(incomingN) < 0.999f || vectorNorm(reflectN) < 0.999f) {
-    Serial.println(F("[MIRROR] Waiting for valid incoming and reflect unit vectors"));
-    return;
-  }
+  Vec3 normal = {0.0f, 0.0f, 0.0f};
 
-  // The mirror normal is the half-rotation (angle bisector) between the
-  // mirror->sun vector and the mirror->target vector.
-  Vec3 sum = {incomingN.x + reflectN.x, incomingN.y + reflectN.y, incomingN.z + reflectN.z};
-  Vec3 normal = normalizedOrZero(sum);
-  if (vectorNorm(normal) < 0.999f) {
-    Serial.println(F("[MIRROR] Incoming and reflect vectors are opposite; no unique mirror normal"));
-    return;
+  if (_targetMode == MODE_INCOMING) {
+    if (vectorNorm(incomingN) < 0.999f) {
+      Serial.println(F("[MIRROR] Waiting for a valid incoming unit vector"));
+      return;
+    }
+    normal = incomingN;
+  } else if (_targetMode == MODE_REFLECT) {
+    if (vectorNorm(reflectN) < 0.999f) {
+      Serial.println(F("[MIRROR] Waiting for a valid reflect unit vector"));
+      return;
+    }
+    normal = reflectN;
+  } else {  // MODE_HALF_ANGLE
+    if (vectorNorm(incomingN) < 0.999f || vectorNorm(reflectN) < 0.999f) {
+      Serial.println(F("[MIRROR] Waiting for valid incoming and reflect unit vectors"));
+      return;
+    }
+
+    // The mirror normal is the half-rotation (angle bisector) between the
+    // mirror->sun vector and the mirror->target vector.
+    Vec3 sum = {incomingN.x + reflectN.x, incomingN.y + reflectN.y, incomingN.z + reflectN.z};
+    normal = normalizedOrZero(sum);
+    if (vectorNorm(normal) < 0.999f) {
+      Serial.println(F("[MIRROR] Incoming and reflect vectors are opposite; no unique mirror normal"));
+      return;
+    }
   }
 
   int16_t pan = SERVO_MID;
@@ -215,8 +261,10 @@ void MirrorController::update() {
 
   moveServos(pan, tilt);
 
+  const char *modeName = _targetMode == MODE_INCOMING ? "incoming" : (_targetMode == MODE_REFLECT ? "reflect" : "half_angle");
   Serial.printf(
-    "[MIRROR] incoming=(%.3f,%.3f,%.3f) reflect=(%.3f,%.3f,%.3f) normal=(%.3f,%.3f,%.3f) -> pan=%d tilt=%d\n",
+    "[MIRROR] mode=%s incoming=(%.3f,%.3f,%.3f) reflect=(%.3f,%.3f,%.3f) normal=(%.3f,%.3f,%.3f) -> pan=%d tilt=%d\n",
+    modeName,
     incomingN.x, incomingN.y, incomingN.z,
     reflectN.x, reflectN.y, reflectN.z,
     normal.x, normal.y, normal.z,
