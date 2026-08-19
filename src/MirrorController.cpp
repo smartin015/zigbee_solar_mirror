@@ -209,8 +209,9 @@ void MirrorController::update() {
     return;
   }
 
-  // Mode 3 explicitly homes the mirror to the calibration pose.
-  if (_targetMode == MODE_CALIBRATION) {
+  // Writing a new calibration vector (or selecting calibration mode) moves
+  // the mirror to the calibration pose: both servos at 2048.
+  if (calibrationChanged || _targetMode == MODE_CALIBRATION) {
     Serial.printf(
       "[MIRROR] Moving to calibration vector (%.3f,%.3f,%.3f) -> pan=%d tilt=%d\n",
       _calibration.x, _calibration.y, _calibration.z, SERVO_MID, SERVO_MID

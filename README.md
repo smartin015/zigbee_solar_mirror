@@ -108,6 +108,9 @@ the mode while the vectors are already set). The firmware waits ~80 ms after
 the last write so X/Y/Z bursts coalesce, then commands both servos in a single
 ST3215 sync-write frame.
 
+Writing a **new calibration vector** also homes the mirror to the calibration
+pose (both servos at 2048), in addition to updating the stored reference.
+
 In `half_angle` mode, if either vector is zero or the two vectors are exactly
 opposite, the firmware keeps the previous servo positions and logs a message.
 
