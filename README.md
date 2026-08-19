@@ -96,8 +96,18 @@ tilt = 2048 + tilt_offset + TILT_DIRECTION * round(phi   * 4096 / 2pi)
 
 Pan wraps at 0/4095; tilt is clamped to `0..4095`.
 
-If a servo moves the wrong way on the real mount, flip `PAN_DIRECTION` or
-`TILT_DIRECTION` in `src/MirrorController.cpp` and reflash.
+If a servo moves the wrong way on the real mount, reverse its direction at
+compile time by uncommenting the corresponding build flag in `platformio.ini`:
+
+```ini
+build_flags =
+	; Reverse a servo if the physical mount moves the wrong way:
+	-DSERVO_PAN_DIRECTION=-1
+	-DSERVO_TILT_DIRECTION=-1
+```
+
+The defaults are `+1` for both axes. Only the sign matters (`-1` reverses the
+axis; any positive value keeps the default direction).
 
 ## Operation
 

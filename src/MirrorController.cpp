@@ -12,10 +12,19 @@ static const uint8_t SERVO_ACC = 50;
 static const uint8_t SERVO_TILT_ID = 1;  // vertical tilt
 static const uint8_t SERVO_PAN_ID = 2;   // horizontal pan
 
-// Which direction a positive servo step moves each axis. Flip these if the
-// physical mount moves the mirror in the opposite direction.
-static const int8_t PAN_DIRECTION = 1;
-static const int8_t TILT_DIRECTION = 1;
+// Which direction a positive servo step moves each axis. Defaults are +1;
+// override at compile time via PlatformIO build flags, e.g.:
+//   -DSERVO_PAN_DIRECTION=-1
+//   -DSERVO_TILT_DIRECTION=-1
+#ifndef SERVO_PAN_DIRECTION
+#define SERVO_PAN_DIRECTION 1
+#endif
+#ifndef SERVO_TILT_DIRECTION
+#define SERVO_TILT_DIRECTION 1
+#endif
+
+static const int8_t PAN_DIRECTION = SERVO_PAN_DIRECTION;
+static const int8_t TILT_DIRECTION = SERVO_TILT_DIRECTION;
 
 // Per-servo calibration offsets are relative to the 2048 mid position and
 // are clamped to one half-turn so the calibration pose stays in 0..4095.
