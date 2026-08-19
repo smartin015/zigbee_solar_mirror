@@ -6,8 +6,9 @@
  *
  *   EP10-12  incoming vector  (mirror -> sun,    unitless, -1..1)
  *   EP13-15  reflect vector   (mirror -> target, unitless, -1..1)
- *   EP16-18  calibration vector (mirror normal at pan=tilt=2048)
- *   EP19     target_mode (0=half_angle, 1=incoming, 2=reflect, 3=calibration)
+ *   EP16     pan_offset       (ST3215 counts, -2048..2047)
+ *   EP17     tilt_offset      (ST3215 counts, -2048..2047)
+ *   EP19     target_mode      (0=half_angle, 1=incoming, 2=reflect, 3=calibration)
  *
  * Each endpoint implements the ZCL Analog Output cluster (genAnalogOutput,
  * 0x000D) with the standard PresentValue attribute (0x0055, single float).
@@ -53,9 +54,8 @@ const tzLocal = {
       'reflect_x',
       'reflect_y',
       'reflect_z',
-      'calibration_x',
-      'calibration_y',
-      'calibration_z',
+      'pan_offset',
+      'tilt_offset',
       'target_mode',
     ],
     convertSet: async (entity, key, value, meta) => {
@@ -69,35 +69,43 @@ const tzLocal = {
   },
 };
 
-const vectorEndpoints = {
+const endpointMap = {
   incoming_x: 10,
   incoming_y: 11,
   incoming_z: 12,
   reflect_x: 13,
   reflect_y: 14,
   reflect_z: 15,
-  calibration_x: 16,
-  calibration_y: 17,
-  calibration_z: 18,
+  pan_offset: 16,
+  tilt_offset: 17,
   target_mode: 19,
 };
 
-const vectorDescriptions = {
+const descriptions = {
   incoming_x: 'Incoming vector X (mirror -> sun, unitless)',
   incoming_y: 'Incoming vector Y (mirror -> sun, unitless)',
   incoming_z: 'Incoming vector Z (mirror -> sun, unitless)',
   reflect_x: 'Reflect vector X (mirror -> target, unitless)',
   reflect_y: 'Reflect vector Y (mirror -> target, unitless)',
   reflect_z: 'Reflect vector Z (mirror -> target, unitless)',
-  calibration_x: 'Calibration normal X at pan=tilt=2048',
-  calibration_y: 'Calibration normal Y at pan=tilt=2048',
-  calibration_z: 'Calibration normal Z at pan=tilt=2048',
+  pan_offset: 'Pan servo calibration offset counts (-2048..2047, +X calibration pose)',
+  tilt_offset: 'Tilt servo calibration offset counts (-2048..2047, +X calibration pose)',
   target_mode: 'Servo target mode: half_angle, incoming, reflect, or calibration',
 };
 
-const exposes = Object.keys(vectorEndpoints).map((name) => {
+const exposes = Object.keys(endpointMap).map((name) => {
   if (name === 'target_mode') {
-    return presets.enum(name, access.ALL, targetModeValues).withDescription(vectorDescriptions[name]).withEndpoint(name);
+    return presets.enum(name, access.ALL, targetModeValues).withDescription(descriptions[name]).withEndpoint(name);
+  }
+
+  if (name === 'pan_offset' || name === 'tilt_offset') {
+    return presets
+      .numeric(name, access.ALL)
+      .withValueMin(-2048)
+      .withValueMax(2047)
+      .withValueStep(1)
+      .withDescription(descriptions[name])
+      .withEndpoint(name);
   }
 
   return presets
@@ -105,7 +113,7 @@ const exposes = Object.keys(vectorEndpoints).map((name) => {
     .withValueMin(-1)
     .withValueMax(1)
     .withValueStep(0.0001)
-    .withDescription(vectorDescriptions[name])
+    .withDescription(descriptions[name])
     .withEndpoint(name);
 });
 
@@ -119,12 +127,12 @@ export default {
   toZigbee: [tzLocal.solar_mirror_analog_output],
   exposes,
   configure: async (device, coordinatorEndpoint, definition) => {
-    for (const endpointId of Object.values(vectorEndpoints)) {
+    for (const endpointId of Object.values(endpointMap)) {
       const endpoint = device.getEndpoint(endpointId);
       if (endpoint) {
         await endpoint.read('genAnalogOutput', ['presentValue']);
       }
     }
   },
-  endpoint: (device) => vectorEndpoints,
+  endpoint: (device) => endpointMap,
 };

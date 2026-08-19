@@ -8,7 +8,8 @@
  *
  *   incoming    EP10-12: unit vector from the mirror toward the sun
  *   reflect     EP13-15: unit vector from the mirror toward the target
- *   calibration EP16-18: mirror normal when both servos are at 2048
+ *   pan_offset  EP16   : calibration offset counts for the pan servo
+ *   tilt_offset EP17   : calibration offset counts for the tilt servo
  *   target_mode EP19   : 0=half_angle, 1=incoming, 2=reflect, 3=calibration
  *
  * Servo roles:
@@ -19,7 +20,7 @@
  * library, analog endpoints, factory-reset button, ZCZR build flag).
  *
  * Factory reset: hold BOOT (GPIO9) for ~3 s. Clears Zigbee NVRAM and the
- * stored calibration vector.
+ * stored per-servo calibration offsets.
  */
 
 #include <Arduino.h>
@@ -44,9 +45,8 @@
 #define EP_REFLECT_X     13
 #define EP_REFLECT_Y     14
 #define EP_REFLECT_Z     15
-#define EP_CAL_X         16
-#define EP_CAL_Y         17
-#define EP_CAL_Z         18
+#define EP_PAN_OFFSET    16
+#define EP_TILT_OFFSET   17
 #define EP_TARGET_MODE   19
 
 // === Global objects ===
@@ -58,9 +58,8 @@ ZigbeeAnalog zbIncomingZ(EP_INCOMING_Z);
 ZigbeeAnalog zbReflectX(EP_REFLECT_X);
 ZigbeeAnalog zbReflectY(EP_REFLECT_Y);
 ZigbeeAnalog zbReflectZ(EP_REFLECT_Z);
-ZigbeeAnalog zbCalX(EP_CAL_X);
-ZigbeeAnalog zbCalY(EP_CAL_Y);
-ZigbeeAnalog zbCalZ(EP_CAL_Z);
+ZigbeeAnalog zbPanOffset(EP_PAN_OFFSET);
+ZigbeeAnalog zbTiltOffset(EP_TILT_OFFSET);
 ZigbeeAnalog zbTargetMode(EP_TARGET_MODE);
 
 // === Factory-reset button state ===
@@ -80,9 +79,8 @@ static void onReflectX(float v) { mirror.setComponent(VECTOR_REFLECT, AXIS_X, v)
 static void onReflectY(float v) { mirror.setComponent(VECTOR_REFLECT, AXIS_Y, v); }
 static void onReflectZ(float v) { mirror.setComponent(VECTOR_REFLECT, AXIS_Z, v); }
 
-static void onCalX(float v) { mirror.setComponent(VECTOR_CALIBRATION, AXIS_X, v); }
-static void onCalY(float v) { mirror.setComponent(VECTOR_CALIBRATION, AXIS_Y, v); }
-static void onCalZ(float v) { mirror.setComponent(VECTOR_CALIBRATION, AXIS_Z, v); }
+static void onPanOffset(float v)  { mirror.setPanOffset(v); }
+static void onTiltOffset(float v) { mirror.setTiltOffset(v); }
 
 static void onTargetMode(float v) {
   long mode = lroundf(v);
@@ -130,8 +128,8 @@ void setup() {
   // Factory-reset button (BOOT = GPIO9).
   pinMode(FACTORY_BTN_PIN, INPUT_PULLUP);
 
-  // Initialise the half-duplex servo link, load calibration, and home both
-  // servos to position 2048.
+  // Initialise the half-duplex servo link, load the per-servo offsets, and
+  // home both servos to the fixed +X calibration pose.
   mirror.begin(SERVO_PIN);
 
   // --- Configure the three Zigbee vectors (9 scalar analog endpoints) ---
@@ -143,9 +141,24 @@ void setup() {
   configureVectorEndpoint(zbReflectY, "Reflect vector Y (mirror->target, unitless)", onReflectY);
   configureVectorEndpoint(zbReflectZ, "Reflect vector Z (mirror->target, unitless)", onReflectZ);
 
-  configureVectorEndpoint(zbCalX, "Calibration normal X at pan=tilt=2048", onCalX);
-  configureVectorEndpoint(zbCalY, "Calibration normal Y at pan=tilt=2048", onCalY);
-  configureVectorEndpoint(zbCalZ, "Calibration normal Z at pan=tilt=2048", onCalZ);
+  // EP16/EP17: per-servo calibration offsets in raw ST3215 counts.
+  zbPanOffset.addAnalogOutput();
+  zbPanOffset.setManufacturerAndModel("Seeed Studio", "XIAO-SolarMirror");
+  zbPanOffset.setAnalogOutputDescription("Pan servo calibration offset counts (calibration pose = +X normal)");
+  zbPanOffset.setAnalogOutputMinMax(-2048.0f, 2047.0f);
+  zbPanOffset.setAnalogOutputResolution(1.0f);
+  zbPanOffset.setAnalogOutputApplication(ESP_ZB_ZCL_AO_SET_APP_TYPE_WITH_ID(ESP_ZB_ZCL_AO_APP_TYPE_COUNT_UNITLESS, 0));
+  zbPanOffset.onAnalogOutputChange(onPanOffset);
+  Zigbee.addEndpoint(&zbPanOffset);
+
+  zbTiltOffset.addAnalogOutput();
+  zbTiltOffset.setManufacturerAndModel("Seeed Studio", "XIAO-SolarMirror");
+  zbTiltOffset.setAnalogOutputDescription("Tilt servo calibration offset counts (calibration pose = +X normal)");
+  zbTiltOffset.setAnalogOutputMinMax(-2048.0f, 2047.0f);
+  zbTiltOffset.setAnalogOutputResolution(1.0f);
+  zbTiltOffset.setAnalogOutputApplication(ESP_ZB_ZCL_AO_SET_APP_TYPE_WITH_ID(ESP_ZB_ZCL_AO_APP_TYPE_COUNT_UNITLESS, 0));
+  zbTiltOffset.onAnalogOutputChange(onTiltOffset);
+  Zigbee.addEndpoint(&zbTiltOffset);
 
   // EP19: target mode (0=half_angle, 1=incoming, 2=reflect, 3=calibration).
   zbTargetMode.addAnalogOutput();
@@ -179,7 +192,6 @@ void setup() {
   // controller's raw state; the debounce in loop() coalesces these writes.
   Vec3 in = mirror.incoming();
   Vec3 refl = mirror.reflect();
-  Vec3 cal = mirror.calibration();
 
   zbIncomingX.setAnalogOutput(in.x);
   zbIncomingY.setAnalogOutput(in.y);
@@ -187,9 +199,8 @@ void setup() {
   zbReflectX.setAnalogOutput(refl.x);
   zbReflectY.setAnalogOutput(refl.y);
   zbReflectZ.setAnalogOutput(refl.z);
-  zbCalX.setAnalogOutput(cal.x);
-  zbCalY.setAnalogOutput(cal.y);
-  zbCalZ.setAnalogOutput(cal.z);
+  zbPanOffset.setAnalogOutput((float)mirror.panOffset());
+  zbTiltOffset.setAnalogOutput((float)mirror.tiltOffset());
   zbTargetMode.setAnalogOutput((float)mirror.targetMode());
 }
 
@@ -217,7 +228,7 @@ void loop() {
         Serial.println(F("[BTN] Hold threshold reached - FACTORY RESET triggered!"));
         digitalWrite(LED_BUILTIN, HIGH);
 
-        mirror.clearCalibration();  // erase stored calibration vector
+        mirror.clearOffsets();  // erase stored servo calibration offsets
         delay(100);
         Zigbee.factoryReset();      // erase Zigbee NVRAM + reboot
         while (1) {

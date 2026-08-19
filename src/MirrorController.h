@@ -10,11 +10,10 @@ struct Vec3 {
   float z;
 };
 
-// Which of the three Zigbee-exposed vectors a component belongs to.
+// Which of the two Zigbee-exposed direction vectors a component belongs to.
 enum VectorKind {
   VECTOR_INCOMING = 0,   // unit vector from the mirror toward the sun
   VECTOR_REFLECT  = 1,   // unit vector from the mirror toward the target
-  VECTOR_CALIBRATION = 2 // mirror normal when both servos are at 2048
 };
 
 enum Axis {
@@ -28,40 +27,50 @@ enum TargetMode {
   MODE_HALF_ANGLE = 0,  // mirror normal = normalize(incoming + reflect)
   MODE_INCOMING = 1,    // mirror normal = normalize(incoming)
   MODE_REFLECT = 2,     // mirror normal = normalize(reflect)
-  MODE_CALIBRATION = 3, // move to the calibration pose (pan=tilt=2048)
+  MODE_CALIBRATION = 3, // move to the calibration pose (2048 + offsets)
 };
 
 //
-// MirrorController owns the two ST3215 servos and translates the three
-// Zigbee vectors into servo positions.
+// MirrorController owns the two ST3215 servos and translates the two Zigbee
+// direction vectors into servo positions.
 //
 // Servo roles (as requested):
 //   servo ID 1 -> vertical tilt
 //   servo ID 2 -> horizontal pan
 //
+// The calibration orientation is fixed to the +X axis, i.e. the mirror
+// normal is (1,0,0) when both servos are at:
+//     pan  = 2048 + panOffset
+//     tilt = 2048 + tiltOffset
+//
 // Coordinate convention (right-handed, Z = up):
 //   A mirror normal n is represented by
 //     elevation  phi = asin(n.z)
 //     azimuth    theta = atan2(n.y, n.x)
-//   The calibration vector n0 is the normal measured with both servos at
-//   position 2048, giving (phi0, theta0). Moving a servo by d steps moves
-//   that axis by d * (2*pi / 4096) radians from the calibrated pose.
+//   Moving a servo by d steps from its calibration pose moves that axis by
+//   d * (2*pi / 4096) radians.
 //
 class MirrorController {
 public:
   MirrorController();
 
-  // Start the half-duplex servo link, enable torque, load calibration from
-  // NVS, and drive both servos to their calibration pose (2048).
+  // Start the half-duplex servo link, enable torque, load the servo offsets
+  // from NVS, and drive both servos to their calibration pose.
   void begin(int8_t dataPin, HardwareSerial &serial = Serial1);
 
-  // Load/erase the calibration vector stored in NVS.
-  void loadCalibration();
-  void saveCalibration();
-  void clearCalibration();
+  // Load/save/erase the per-servo calibration offsets stored in NVS.
+  void loadOffsets();
+  void saveOffsets();
+  void clearOffsets();
 
   // Called by the Zigbee callbacks whenever a vector component is written.
   void setComponent(VectorKind kind, Axis axis, float value);
+
+  // Called by the Zigbee callbacks when a servo offset is written.
+  void setPanOffset(float value);
+  void setTiltOffset(float value);
+  int16_t panOffset() const  { return _panOffset; }
+  int16_t tiltOffset() const { return _tiltOffset; }
 
   // Select how incoming/reflect are interpreted (TargetMode values above).
   void setTargetMode(uint8_t mode);
@@ -76,7 +85,6 @@ public:
 
   Vec3 incoming() const   { return _incoming; }
   Vec3 reflect() const    { return _reflect; }
-  Vec3 calibration() const { return _calibration; }
   bool servosOk() const   { return _servosOk; }
   int16_t lastPan() const  { return _pan; }
   int16_t lastTilt() const { return _tilt; }
@@ -84,24 +92,25 @@ public:
 private:
   void markDirty();
   void moveServos(int16_t pan, int16_t tilt);
+  void calibrationPose(int16_t &pan, int16_t &tilt) const;
   bool computeServoPositions(const Vec3 &normal, int16_t &pan, int16_t &tilt) const;
 
   static Vec3 normalizedOrZero(const Vec3 &v);
   static float vectorNorm(const Vec3 &v);
-  static float wrapPi(float angle);
   static float clampF(float v, float lo, float hi);
   static int32_t wrapInt(int32_t v, int32_t mod);
 
   SMS_STS_HalfDuplex _servo;
 
-  Vec3 _incoming;        // raw components written over Zigbee
-  Vec3 _reflect;         // raw components written over Zigbee
-  Vec3 _calibrationRaw;  // raw calibration components written over Zigbee
-  Vec3 _calibration;     // last valid unit calibration vector (persisted)
+  Vec3 _incoming;  // raw components written over Zigbee
+  Vec3 _reflect;   // raw components written over Zigbee
+
+  int16_t _panOffset;   // calibration offset counts, pan servo (persisted)
+  int16_t _tiltOffset;  // calibration offset counts, tilt servo (persisted)
 
   bool _incomingDirty;
   bool _reflectDirty;
-  bool _calibrationDirty;
+  bool _offsetsDirty;
   bool _targetModeDirty;
 
   uint8_t _targetMode;

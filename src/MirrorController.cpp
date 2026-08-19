@@ -17,25 +17,27 @@ static const uint8_t SERVO_PAN_ID = 2;   // horizontal pan
 static const int8_t PAN_DIRECTION = 1;
 static const int8_t TILT_DIRECTION = 1;
 
-// Time to wait after the last Zigbee vector write before recomputing, so the
-// three X/Y/Z attribute writes arrive as one logical update.
+// Per-servo calibration offsets are relative to the 2048 mid position and
+// are clamped to one half-turn so the calibration pose stays in 0..4095.
+static const int16_t OFFSET_MIN = -2048;
+static const int16_t OFFSET_MAX = 2047;
+
+// Time to wait after the last Zigbee write before recomputing, so the three
+// X/Y/Z attribute writes arrive as one logical update.
 static const uint32_t DEBOUNCE_MS = 80;
 
 static const char *PREFS_NAMESPACE = "solar_mirror";
-static const char *PREFS_CAL_X = "cal_x";
-static const char *PREFS_CAL_Y = "cal_y";
-static const char *PREFS_CAL_Z = "cal_z";
-
-static const Vec3 DEFAULT_CALIBRATION = {1.0f, 0.0f, 0.0f};
+static const char *PREFS_PAN_OFFSET = "pan_off";
+static const char *PREFS_TILT_OFFSET = "tilt_off";
 
 MirrorController::MirrorController()
   : _incoming{0.0f, 0.0f, 0.0f},
     _reflect{0.0f, 0.0f, 0.0f},
-    _calibrationRaw(DEFAULT_CALIBRATION),
-    _calibration(DEFAULT_CALIBRATION),
+    _panOffset(0),
+    _tiltOffset(0),
     _incomingDirty(false),
     _reflectDirty(false),
-    _calibrationDirty(false),
+    _offsetsDirty(false),
     _targetModeDirty(false),
     _targetMode(MODE_HALF_ANGLE),
     _servosOk(false),
@@ -64,63 +66,52 @@ void MirrorController::begin(int8_t dataPin, HardwareSerial &serial) {
     }
   }
 
-  loadCalibration();
+  loadOffsets();
   Serial.printf(
-    "[SERVO] Calibration vector: (%.4f, %.4f, %.4f) at pan=tilt=2048\n",
-    _calibration.x, _calibration.y, _calibration.z
+    "[SERVO] Calibration pose (+X normal): pan=%d tilt=%d (offsets pan=%d tilt=%d)\n",
+    SERVO_MID + _panOffset, SERVO_MID + _tiltOffset, _panOffset, _tiltOffset
   );
 
   homeServos();
 }
 
-void MirrorController::loadCalibration() {
+void MirrorController::loadOffsets() {
   Preferences prefs;
   if (!prefs.begin(PREFS_NAMESPACE, true)) {
-    _calibration = DEFAULT_CALIBRATION;
-    Serial.println(F("[SERVO] NVS unavailable, using default calibration (1,0,0)"));
+    _panOffset = 0;
+    _tiltOffset = 0;
+    Serial.println(F("[SERVO] NVS unavailable, using zero servo offsets"));
     return;
   }
 
-  if (prefs.isKey(PREFS_CAL_X) && prefs.isKey(PREFS_CAL_Y) && prefs.isKey(PREFS_CAL_Z)) {
-    Vec3 cal = {
-      prefs.getFloat(PREFS_CAL_X, DEFAULT_CALIBRATION.x),
-      prefs.getFloat(PREFS_CAL_Y, DEFAULT_CALIBRATION.y),
-      prefs.getFloat(PREFS_CAL_Z, DEFAULT_CALIBRATION.z),
-    };
-    Vec3 n = normalizedOrZero(cal);
-    if (vectorNorm(n) > 0.999f) {
-      _calibration = n;
-    } else {
-      _calibration = DEFAULT_CALIBRATION;
-      Serial.println(F("[SERVO] Stored calibration is invalid, using default (1,0,0)"));
-    }
-  } else {
-    _calibration = DEFAULT_CALIBRATION;
-    Serial.println(F("[SERVO] No calibration stored, using default (1,0,0)"));
-  }
+  _panOffset = (int16_t)constrain((int32_t)prefs.getShort(PREFS_PAN_OFFSET, 0), (int32_t)OFFSET_MIN, (int32_t)OFFSET_MAX);
+  _tiltOffset = (int16_t)constrain((int32_t)prefs.getShort(PREFS_TILT_OFFSET, 0), (int32_t)OFFSET_MIN, (int32_t)OFFSET_MAX);
   prefs.end();
+
+  if (_panOffset == 0 && _tiltOffset == 0) {
+    Serial.println(F("[SERVO] No servo offsets stored, using zero offsets"));
+  }
 }
 
-void MirrorController::saveCalibration() {
+void MirrorController::saveOffsets() {
   Preferences prefs;
   if (!prefs.begin(PREFS_NAMESPACE, false)) {
-    Serial.println(F("[SERVO] Could not open NVS to save calibration"));
+    Serial.println(F("[SERVO] Could not open NVS to save servo offsets"));
     return;
   }
-  prefs.putFloat(PREFS_CAL_X, _calibration.x);
-  prefs.putFloat(PREFS_CAL_Y, _calibration.y);
-  prefs.putFloat(PREFS_CAL_Z, _calibration.z);
+  prefs.putShort(PREFS_PAN_OFFSET, _panOffset);
+  prefs.putShort(PREFS_TILT_OFFSET, _tiltOffset);
   prefs.end();
 }
 
-void MirrorController::clearCalibration() {
+void MirrorController::clearOffsets() {
   Preferences prefs;
   if (prefs.begin(PREFS_NAMESPACE, false)) {
     prefs.clear();
     prefs.end();
   }
-  _calibration = DEFAULT_CALIBRATION;
-  _calibrationRaw = DEFAULT_CALIBRATION;
+  _panOffset = 0;
+  _tiltOffset = 0;
   markDirty();
 }
 
@@ -139,15 +130,36 @@ void MirrorController::setComponent(VectorKind kind, Axis axis, float value) {
       else _reflect.z = value;
       _reflectDirty = true;
       break;
-
-    case VECTOR_CALIBRATION:
-      if (axis == AXIS_X) _calibrationRaw.x = value;
-      else if (axis == AXIS_Y) _calibrationRaw.y = value;
-      else _calibrationRaw.z = value;
-      _calibrationDirty = true;
-      break;
   }
 
+  markDirty();
+}
+
+void MirrorController::setPanOffset(float value) {
+  int16_t v = (int16_t)lroundf(value);
+  if (v < OFFSET_MIN) v = OFFSET_MIN;
+  if (v > OFFSET_MAX) v = OFFSET_MAX;
+
+  if (v == _panOffset) {
+    return;
+  }
+
+  _panOffset = v;
+  _offsetsDirty = true;
+  markDirty();
+}
+
+void MirrorController::setTiltOffset(float value) {
+  int16_t v = (int16_t)lroundf(value);
+  if (v < OFFSET_MIN) v = OFFSET_MIN;
+  if (v > OFFSET_MAX) v = OFFSET_MAX;
+
+  if (v == _tiltOffset) {
+    return;
+  }
+
+  _tiltOffset = v;
+  _offsetsDirty = true;
   markDirty();
 }
 
@@ -176,26 +188,12 @@ void MirrorController::update() {
   }
   _dirty = false;
 
-  bool calibrationChanged = false;
-  if (_calibrationDirty) {
-    _calibrationDirty = false;
-
-    Vec3 n = normalizedOrZero(_calibrationRaw);
-    if (vectorNorm(n) > 0.999f) {
-      float delta = fabsf(n.x - _calibration.x) + fabsf(n.y - _calibration.y) + fabsf(n.z - _calibration.z);
-      if (delta > 1e-6f) {
-        _calibration = n;
-        saveCalibration();
-        calibrationChanged = true;
-        Serial.printf(
-          "[SERVO] Calibration updated: (%.4f, %.4f, %.4f) at pan=tilt=2048\n",
-          _calibration.x, _calibration.y, _calibration.z
-        );
-      }
-    } else {
-      _calibrationRaw = _calibration;  // drop the invalid write
-      Serial.println(F("[SERVO] Invalid calibration vector, keeping previous value"));
-    }
+  bool offsetsChanged = false;
+  if (_offsetsDirty) {
+    _offsetsDirty = false;
+    saveOffsets();
+    offsetsChanged = true;
+    Serial.printf("[SERVO] Servo offsets updated: pan=%d tilt=%d\n", _panOffset, _tiltOffset);
   }
 
   bool incomingChanged = _incomingDirty;
@@ -205,18 +203,19 @@ void MirrorController::update() {
   _reflectDirty = false;
   _targetModeDirty = false;
 
-  if (!incomingChanged && !reflectChanged && !calibrationChanged && !modeChanged) {
+  if (!incomingChanged && !reflectChanged && !offsetsChanged && !modeChanged) {
     return;
   }
 
-  // Writing a new calibration vector (or selecting calibration mode) moves
-  // the mirror to the calibration pose: both servos at 2048.
-  if (calibrationChanged || _targetMode == MODE_CALIBRATION) {
-    Serial.printf(
-      "[MIRROR] Moving to calibration vector (%.3f,%.3f,%.3f) -> pan=%d tilt=%d\n",
-      _calibration.x, _calibration.y, _calibration.z, SERVO_MID, SERVO_MID
-    );
-    moveServos(SERVO_MID, SERVO_MID);
+  // Calibration mode moves to the fixed +X calibration pose. Because this
+  // branch is reached whenever offsets change, the servo positions live
+  // update as new offset counts are written.
+  if (_targetMode == MODE_CALIBRATION) {
+    int16_t pan = SERVO_MID;
+    int16_t tilt = SERVO_MID;
+    calibrationPose(pan, tilt);
+    Serial.printf("[MIRROR] Calibration mode: +X pose -> pan=%d tilt=%d\n", pan, tilt);
+    moveServos(pan, tilt);
     return;
   }
 
@@ -256,7 +255,7 @@ void MirrorController::update() {
   int16_t pan = SERVO_MID;
   int16_t tilt = SERVO_MID;
   if (!computeServoPositions(normal, pan, tilt)) {
-    Serial.println(F("[MIRROR] Could not compute servo positions (bad calibration)"));
+    Serial.println(F("[MIRROR] Could not compute servo positions"));
     return;
   }
 
@@ -274,8 +273,11 @@ void MirrorController::update() {
 }
 
 void MirrorController::homeServos() {
-  Serial.println(F("[SERVO] Homing both servos to 2048"));
-  moveServos(SERVO_MID, SERVO_MID);
+  int16_t pan = SERVO_MID;
+  int16_t tilt = SERVO_MID;
+  calibrationPose(pan, tilt);
+  Serial.printf("[SERVO] Homing to calibration pose: pan=%d tilt=%d\n", pan, tilt);
+  moveServos(pan, tilt);
 }
 
 void MirrorController::markDirty() {
@@ -301,31 +303,29 @@ void MirrorController::moveServos(int16_t pan, int16_t tilt) {
 }
 
 bool MirrorController::computeServoPositions(const Vec3 &normal, int16_t &pan, int16_t &tilt) const {
-  Vec3 cal = normalizedOrZero(_calibration);
-  if (vectorNorm(cal) < 0.999f) {
-    return false;
-  }
-
   const float stepsPerRad = (float)SERVO_RANGE / (2.0f * (float)M_PI);
 
-  float phi0 = asinf(clampF(cal.z, -1.0f, 1.0f));
-  float theta0 = atan2f(cal.y, cal.x);
-
+  // The calibration normal is fixed at +X, i.e. theta=0, phi=0.
   float phi = asinf(clampF(normal.z, -1.0f, 1.0f));
   float theta = atan2f(normal.y, normal.x);
 
-  float dTheta = wrapPi(theta - theta0);
-  float dPhi = phi - phi0;
-
-  int32_t panSteps = (int32_t)SERVO_MID + (int32_t)lroundf((float)PAN_DIRECTION * dTheta * stepsPerRad);
-  int32_t tiltSteps = (int32_t)SERVO_MID + (int32_t)lroundf((float)TILT_DIRECTION * dPhi * stepsPerRad);
+  int32_t panSteps = (int32_t)SERVO_MID + _panOffset + (int32_t)lroundf((float)PAN_DIRECTION * theta * stepsPerRad);
+  int32_t tiltSteps = (int32_t)SERVO_MID + _tiltOffset + (int32_t)lroundf((float)TILT_DIRECTION * phi * stepsPerRad);
 
   panSteps = wrapInt(panSteps, SERVO_RANGE);
-  tiltSteps = constrain((int32_t)tiltSteps, (int32_t)0, (int32_t)(SERVO_RANGE - 1));
+  tiltSteps = constrain(tiltSteps, (int32_t)0, (int32_t)(SERVO_RANGE - 1));
 
   pan = (int16_t)panSteps;
   tilt = (int16_t)tiltSteps;
   return true;
+}
+
+void MirrorController::calibrationPose(int16_t &pan, int16_t &tilt) const {
+  int32_t panSteps = wrapInt((int32_t)SERVO_MID + _panOffset, SERVO_RANGE);
+  int32_t tiltSteps = constrain((int32_t)SERVO_MID + _tiltOffset, (int32_t)0, (int32_t)(SERVO_RANGE - 1));
+
+  pan = (int16_t)panSteps;
+  tilt = (int16_t)tiltSteps;
 }
 
 Vec3 MirrorController::normalizedOrZero(const Vec3 &v) {
@@ -338,16 +338,6 @@ Vec3 MirrorController::normalizedOrZero(const Vec3 &v) {
 
 float MirrorController::vectorNorm(const Vec3 &v) {
   return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
-}
-
-float MirrorController::wrapPi(float angle) {
-  while (angle > (float)M_PI) {
-    angle -= 2.0f * (float)M_PI;
-  }
-  while (angle < -(float)M_PI) {
-    angle += 2.0f * (float)M_PI;
-  }
-  return angle;
 }
 
 float MirrorController::clampF(float v, float lo, float hi) {
